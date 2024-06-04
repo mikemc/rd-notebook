@@ -1,0 +1,16 @@
+---
+title: "About"
+# image: profile.jpg
+about:
+  template: jolla
+  links:
+    - icon: globe
+      text: NAO website
+      href: https://naobservatory.org
+    - icon: github
+      text: NAO Github
+      href: https://github.com/naobservatory
+
+---
+
+This site houses the research notebook for the NAO Robust Detection Team.
