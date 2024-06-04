@@ -1,0 +1,233 @@
+---
+title: "Modeling the effects of a homophilous minority class on detection"
+# description: ""
+author: "Mike"
+date: today
+draft: true
+categories: 
+  - theory
+format:
+  html:
+    toc: true
+    fig-format: svg
+    fig-dpi: 300
+    fig-width: 10
+    fig-asp: 0.618
+    # fig-asp: 0.8
+execute:
+  echo: false
+---
+
+```{r setup}
+library(tidyverse)
+library(fs)
+library(here)
+library(knitr)
+library(broom)
+
+# Plotting setup
+
+library(cowplot)
+library(patchwork)
+# library(ggbeeswarm)
+
+theme_set(theme_cowplot())
+# Okabe Ito color scheme with amber for yellow; see https://easystats.github.io/see/reference/scale_color_okabeito.html
+colors_oi <- grDevices::palette.colors()  
+colors_oi['yellow'] <- "#F5C710"
+colors_oi <- colors_oi |> unname()
+```
+
+todo
+
+- reframe to be about an abstract minority class rather than frequent flyers specifically
+
+## Simulation: Pandemic starts in minority class
+
+SIR model with 2 population classes with assortative interactions. Imagine that the pandemic starts in a class that is a small minority of the total population. 
+
+Define an assortment parameter $a$, such that $a$ is the fraction of interactions that are with members of ones' own class due to assortative. We model assortment by supposing that an interation is assortative with probability $a$, in which case it is with a random member of ones own type; and it is non-assortative with probability $1-a$, in which case it is with a random person.
+
+Note, here I use $\gamma$ to be the rate at which an infected person has an interaction that (if it is with a susceptible individual) infects the person they interact with. 
+
+Below, I refer to the two classes as low and high frequency fliers, but there is nothing specific to flier status as the classes here.
+
+```{r}
+# modified from http://epirecip.es/epicookbook/chapters/seir/r_desolve
+
+# Function to return derivatives of SEIR model
+ode_sir_ff <- function(t, Y, par){
+  # low-frequency fliers
+  S_l <- Y[1]
+  I_l <- Y[2]
+  R_l <- Y[3]
+  # high-frequency fliers
+  S_h <- Y[4]
+  I_h <- Y[5]
+  R_h <- Y[6]
+  # totals
+  N_l <- sum(Y[1:3])
+  N_h <- sum(Y[4:6])
+  N <- N_l + N_h
+  # S <- S_l + S_h
+  # I <- I_l + I_h
+  # R <- R_l + R_h
+  
+  gamma_l <- par[1]
+  alpha_l <- par[2]
+  gamma_f <- par[3]
+  alpha_f <- par[4]
+  a <- par[5]
+
+  # Low-frequency fliers
+  new_infections_l <- 
+    # new l infections caused by I_l
+    gamma_l * I_l * (a * S_l / N_l + (1-a) * S_l / N) +
+    # new l infections caused by I_h
+    gamma_h * I_h * (1-a) * S_l / N
+  recoveries_l <- alpha_l * I_l
+  dS_l <- -new_infections_l
+  dI_l <- new_infections_l - recoveries_l
+  dR_l <- recoveries_l 
+  # High-frequency fliers
+  new_infections_h <- 
+    # new h infections caused by I_h
+    gamma_h * I_h * (a * S_h / N_h + (1-a) * S_h / N) +
+    # new h infections caused by I_l
+    gamma_l * I_l * (1-a) * S_h / N
+  recoveries_h <- alpha_h * I_h
+  dS_h <- -new_infections_h
+  dI_h <- new_infections_h - recoveries_h
+  dR_h <- recoveries_h 
+     
+  # dY <- vector(length=6)
+  dY <- c(
+    dS_l,
+    dI_l,
+    dR_l,
+    dS_h,
+    dI_h,
+    dR_h
+  )
+  return(list(dY))
+}
+
+# Set parameter values
+alpha_l <- alpha_h <- 1/5
+R0_l <- R0_h <- 3
+# R0_h <- R0_l * 2.5
+N_h <- 1e5
+N_l <- 1e7 - N_h
+a <- 0.40
+# Set beta from the basic reproduction number, from R0 = beta * N / alpha
+beta_l <- R0_l * alpha_l / (N_l + N_h)
+beta_h <- R0_h * alpha_h / (N_l + N_h)
+# Set gamma from beta
+gamma_l <- beta_l * (N_l + N_h)
+gamma_h <- beta_h * (N_l + N_h)
+
+# Set initial conditions: Start from a single infection in a frequent flyer
+init <- c(
+  N_l,
+  0,
+  0,
+  N_h - 1,
+  1,
+  0
+)
+t <- seq(0, 150)
+par <- c(
+  gamma_l,
+  alpha_l,
+  gamma_h,
+  alpha_h,
+  a
+)
+# Solve system using lsoda
+sol <- deSolve::lsoda(init, t, ode_sir_ff, par) |>
+  as_tibble() |>
+  set_names(c("time", "S_l", "I_l", "R_l", "S_h", "I_h", "R_h"))
+
+x <- sol |>
+  mutate(
+    across(everything(), as.numeric),
+  ) |>
+  pivot_longer(-time, values_to = "n") |>
+  separate(name, remove = FALSE, sep = "_", into = c("status", "class")) |>
+  mutate(
+    # across(name, fct_inorder),
+    status = factor(status, levels = c("S", "I", "R")),
+    class = factor(class, levels = c("l", "h")),
+    class = fct_recode(class, high = "h", low = "l"),
+    frac = case_when(
+      class == "high" ~ n / N_h,
+      class == "low" ~ n / N_l,
+    )
+  )
+```
+
+```{r}
+p <- x |>
+  ggplot(aes(time, n, color = status, linetype = class)) +
+  scale_color_manual(values = colors_oi) +
+  geom_line(aes(group = name)) +
+  labs(y = "Number of individuals")
+p / (p + scale_y_log10(limits = c(1, 1e7)))
+```
+
+```{r}
+p <- x |>
+  ggplot(aes(time, frac, color = status, linetype = class)) +
+  scale_color_manual(values = colors_oi) +
+  geom_line(aes(group = name)) +
+  labs(y = "Fraction within class")
+p / (p + scale_y_log10())
+```
+
+```{r}
+x |>
+  ggplot(aes(time, n, color = status)) +
+  facet_wrap(~class, ncol = 1) +
+  scale_y_log10() +
+  scale_color_manual(values = colors_oi) +
+  geom_line() +
+  labs(y = "Number of individuals")
+```
+
+```{r}
+x |>
+  ggplot(aes(time, frac, color = status)) +
+  facet_wrap(~class, ncol = 1) +
+  scale_y_log10() +
+  scale_color_manual(values = colors_oi) +
+  geom_line() +
+  labs(y = "Fraction within class")
+```
+
+```{r}
+x |>
+  filter(status == "I", time <= 50) |>
+  pivot_longer(cols = c(n, frac), names_to = "abundance_type", values_to = "abundance") |>
+  ggplot(aes(time, abundance, color = class)) +
+  facet_wrap(~abundance_type, ncol = 1, scales = "free_y") +
+  scale_y_log10() +
+  scale_color_manual(values = colors_oi[7:8]) +
+  geom_vline(xintercept = log(2) / (gamma_l * (1 - a)), color = "lightgrey") +
+  geom_line() +
+  labs(y = "Active infections")
+```
+
+
+The time $\log(2)/[\gamma (1-a)]$ is the timescale at which the number of infections within the low class catches up to that of high class (Derived from analytical approximation for $N_h \ll N_l$ and confirmed by varying varying $\gamma$ and $a$ in simulations).
+But the advantage in terms of relative infection rate persists much longer (e.g. ~10 times longer in many cases). (This seems to be true if I fix the params but vary a, until we're in the regime where the epidemic peaks before equality is reached; but I should see what effect $\gamma$ has on this).
+
+Thus the advantage of monitoring the minority class when the epidemic starts in the minority class is larger than I would have expected for a given assortment rate.
+
+I should try a simpler EG model to verify and understand this result.
+
+Should refactor the above to make it easier to try different param combos.
+
+Should examine what happens if $\gamma$ is higher in the minority class.
+
+It looks like, the effect of having a higher $R_0$ or $\gamma$ in the minority class depends on this difference relative to the assortment rate. At small assortment rates (high mixing rate $1-a$), even a large $\gamma$ advantage has minimal effect, I guess because all these new infections are quickly feeding into the larger population. But we can get a large persistant advantage when the gamma advantage is high enough relative to the mixing rate. (Perhaps we can understand by thinking of the frequency of minority-class infections among all infections similar to mutation-selection equilibrium.)
+
