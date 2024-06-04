@@ -1,0 +1,213 @@
+---
+title: "Modeling local infection lag in traveller monitoring"
+description: "Using simple models to illustrate and build intuition for how the 'local infection lag' mechanism favors monitoring incoming air travellers versus the local community."
+author: "Mike"
+date: today
+draft: true
+categories: 
+  - theory
+format:
+  html:
+    toc: true
+    fig-format: svg
+    fig-dpi: 300
+    fig-width: 10
+    fig-asp: 0.618
+    # fig-asp: 0.8
+execute:
+  echo: false
+---
+
+```{r setup}
+library(tidyverse)
+library(fs)
+library(here)
+library(knitr)
+library(broom)
+
+# Plotting setup
+
+library(cowplot)
+library(patchwork)
+# library(ggbeeswarm)
+
+theme_set(theme_cowplot())
+# Okabe Ito color scheme with amber for yellow; see https://easystats.github.io/see/reference/scale_color_okabeito.html
+colors_oi <- grDevices::palette.colors()  
+colors_oi['yellow'] <- "#F5C710"
+colors_oi <- colors_oi |> unname()
+```
+
+## Simulation of global + local dynamics
+
+SIR model with two populations with migration. One is a "local" population, the other is "global" which is actually the rest of the world minus the local population.
+
+Let migration parameter $m$ be the rate at which an individual moves anywhere, and suppose that where they move is proportional to population size. So a local person moves to the rest of the world with rate $m N_g / (N_g + N_l)$, and a global person moves to the focal location at rate $m N_l / (N_g + N_l)$. 
+
+
+```{r}
+# modified from http://epirecip.es/epicookbook/chapters/seir/r_desolve
+
+# Function to return derivatives of SEIR model
+ode_sir_local_global <- function(t, Y, par){
+  S_l <- Y[1]
+  I_l <- Y[2]
+  R_l <- Y[3]
+  S_g <- Y[4]
+  I_g <- Y[5]
+  R_g <- Y[6]
+  
+  beta_l <- par[1]
+  alpha_l <- par[2]
+  beta_g <- par[3]
+  alpha_g <- par[4]
+  m <- par[5]
+  
+  # Local
+  dS_l <- -beta_l * I_l * S_l                + m * (S_g * N_l - S_l * N_g ) / (N_g + N_l)
+  dI_l <- beta_l * I_l * S_l - alpha_l * I_l + m * (I_g * N_l - I_l * N_g ) / (N_g + N_l)
+  dR_l <- alpha_l * I_l                      + m * (R_g * N_l - R_l * N_g ) / (N_g + N_l)
+  # Global
+  dS_g <- -beta_g * I_g * S_g                - m * (S_g * N_l - S_l * N_g ) / (N_g + N_l)
+  dI_g <- beta_g * I_g * S_g - alpha_g * I_g - m * (I_g * N_l - I_l * N_g ) / (N_g + N_l)
+  dR_g <- alpha_g * I_g                      - m * (R_g * N_l - R_l * N_g ) / (N_g + N_l)
+  # Possible simplifications: split out migration into it's own thing, possibly using matrix multiplication? And/or since l and g components undergo same dynamics, could have a single function doing it.
+
+  # dY <- vector(length=6)
+  dY <- c(
+    dS_l,
+    dI_l,
+    dR_l,
+    dS_g,
+    dI_g,
+    dR_g
+  )
+  return(list(dY))
+}
+
+# Set parameter values
+alpha_l <- alpha_g <- 1/5
+R0_l <- R0_g <- 3
+N_l <- 1e7
+N_g <- 1e10
+m <- (1/300)
+# Set beta from the basic reproduction number, from R0 = beta * N / alpha
+beta_l <- R0_l * alpha_l / N_l
+beta_g <- R0_g * alpha_g / N_g
+
+# Set initial conditions: Start from a single global infection
+init <- c(
+  N_l,
+  0,
+  0,
+  N_g - 1,
+  1,
+  0
+)
+t <- seq(0, 250)
+par <- c(
+  beta_l,
+  alpha_l,
+  beta_g,
+  alpha_g,
+  m
+)
+# Solve system using lsoda
+sol <- deSolve::lsoda(init, t, ode_sir_local_global, par) |>
+  as_tibble() |>
+  set_names(c("time", "S_l", "I_l", "R_l", "S_g", "I_g", "R_g"))
+
+x <- sol |>
+  mutate(
+    across(everything(), as.numeric),
+  ) |>
+  pivot_longer(-time, values_to = "n") |>
+  separate(name, remove = FALSE, sep = "_", into = c("status", "location")) |>
+  mutate(
+    # across(name, fct_inorder),
+    status = factor(status, levels = c("S", "I", "R")),
+    location = factor(location, levels = c("g", "l")),
+    location = fct_recode(location, global = "g", local = "l"),
+    frac = case_when(
+      location == "global" ~ n / N_g,
+      location == "local" ~ n / N_l,
+    )
+  )
+
+# clrs <- c(
+#   S = colors_oi[['orange']],
+#   E = colors_oi[['skyblue']],
+#   I = colors_oi[['bluishgreen']],
+#   R = colors_oi[['vermillion']],
+#   I_pred = colors_oi[['gray']] 
+# )
+```
+
+```{r}
+p <- x |>
+  ggplot(aes(time, n, color = status, linetype = location)) +
+  scale_color_manual(values = colors_oi) +
+  geom_line(aes(group = name)) +
+  labs(y = "Number of individuals")
+p / (p + scale_y_log10(limits = c(1, N_g), breaks = c(1, 1e2, 1e4, 1e6, 1e8, 1e10)))
+```
+
+```{r}
+p <- x |>
+  ggplot(aes(time, frac, color = status, linetype = location)) +
+  scale_color_manual(values = colors_oi) +
+  geom_line(aes(group = name)) +
+  labs(y = "Fraction of individuals")
+p / (p + scale_y_log10(limits = c(1/N_g, 1)))
+```
+
+```{r}
+x |>
+  ggplot(aes(time, n, color = status)) +
+  facet_wrap(~location, ncol = 1) +
+  scale_y_log10(limits = c(1, N_g), breaks = c(1, 1e2, 1e4, 1e6, 1e8, 1e10)) +
+  # scale_y_log10() +
+  scale_color_manual(values = colors_oi) +
+  geom_line() +
+  labs(y = "Number of individuals")
+```
+
+```{r}
+x |>
+  ggplot(aes(time, frac, color = status)) +
+  facet_wrap(~location, ncol = 1) +
+  # scale_y_log10(limits = c(1, N_g), breaks = c(1, 1e2, 1e4, 1e6, 1e8, 1e10)) +
+  scale_y_log10(limits = c(1/N_g, 1)) +
+  scale_color_manual(values = colors_oi) +
+  geom_line() +
+  labs(y = "Number of individuals")
+```
+
+```{r}
+x |>
+  filter(status == "I") |>
+  pivot_longer(cols = c(n, frac), names_to = "abundance_type", values_to = "abundance") |>
+  ggplot(aes(time, abundance, color = location)) +
+  facet_wrap(~abundance_type, ncol = 1, scales = "free_y") +
+  scale_y_log10() +
+  # scale_y_log10(limits = c(1/N_g, 1.5)) +
+  scale_color_manual(values = colors_oi[7:8]) +
+  geom_line() +
+  labs(y = "Active infections")
+```
+
+Note, in this simulation, the migration rate is only once per 300 days, so that the global infection rate leads for the entire initial pandemic wave.
+
+Things to illustrate (perhaps just with fraction)
+
+- Two scenarios, based on $1/m$ being larger or smaller than the time to pandemic period.
+  - mark the time scales on the x axis
+  - present the time scale formulas
+- in case where migration is fast - effect of detection threshold and how it must be sufficiently low for global detection to help
+
+other todos
+- change "global" to be "rest of the world"?
+- consider streamlining simulation code
+- encapsulate simulation block to more easily do for different parameters?
+- consider removing (or setting to 0) values where n < 1
+
